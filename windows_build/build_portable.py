@@ -12,7 +12,7 @@ Everything else (pip, matplotlib/numpy/openpyxl/Pillow) is installed normally
 into the bundle's own site-packages, so the target computer never touches the
 internet.
 
-Usage: python packaging/build_portable.py
+Usage: python windows_build/build_portable.py
 Requires: a working internet connection on THIS (build) machine only, and a
 full (non-embeddable) install of the same Python version to source tkinter from.
 """
@@ -65,7 +65,7 @@ def main():
     print(f"Using donor Python (for tkinter) at: {donor}")
 
     # -- 1. download + extract the embeddable interpreter ------------------------
-    zip_path = ROOT / "packaging" / f"python-{PY_VERSION}-embed-amd64.zip"
+    zip_path = ROOT / "windows_build" / f"python-{PY_VERSION}-embed-amd64.zip"
     if not zip_path.exists():
         print(f"Downloading {EMBED_URL}")
         urllib.request.urlretrieve(EMBED_URL, zip_path)
@@ -111,7 +111,7 @@ def main():
     pth_path.write_text("\n".join(new_lines) + "\n")
 
     # -- 4. bootstrap pip, then install this app's real dependencies -------------
-    get_pip_path = ROOT / "packaging" / "get-pip.py"
+    get_pip_path = ROOT / "windows_build" / "get-pip.py"
     if not get_pip_path.exists():
         print(f"Downloading {GET_PIP_URL}")
         urllib.request.urlretrieve(GET_PIP_URL, get_pip_path)

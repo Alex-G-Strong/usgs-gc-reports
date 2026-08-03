@@ -1,5 +1,22 @@
 # Packaging
 
+> **Naming warning**: this folder was originally named `packaging/`, which
+> collides with the third-party `packaging` PyPI library (a dependency of
+> matplotlib, PyInstaller, and others). With the repo root on `sys.path` (which
+> happens for `python main.py` run from the repo root, and for any script doing
+> `sys.path.insert(0, repo_root)`), a same-named local folder shadows the real
+> package and breaks every import of it. It was renamed to `windows_build/` to
+> fix this — don't rename it back to `packaging/`, and be wary of this class of
+> collision if renaming again (avoid names matching any installed PyPI package).
+> A related incident from the same root cause: an early `build_portable.py` run,
+> before its `PYTHONNOUSERSITE` fix existed, had pip inside the portable
+> interpreter resolve to this *build machine's* real per-user site-packages
+> (site-packages lookup is keyed to the OS user profile, not the interpreter)
+> and genuinely uninstalled `packaging`/`wheel` from the system Python while
+> "upgrading" them — not a local-folder shadow, an actual uninstall. Fixed by
+> reinstalling both; the `PYTHONNOUSERSITE` fix (already in this script)
+> prevents it from happening again on a future rebuild.
+
 Two ways to distribute this app to a lab machine, for two different security
 postures:
 
@@ -22,17 +39,17 @@ without its `_internal\` folder, won't run). After building, run
 icon — a visual cue that it's one bundle, not a folder to pick files out of:
 
 ```
-powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "dist\USGS_GC_Reports"
-powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "portable\USGS_GC_Reports_Portable"
+powershell -ExecutionPolicy Bypass -File windows_build\set_folder_icon.ps1 -FolderPath "dist\USGS_GC_Reports"
+powershell -ExecutionPolicy Bypass -File windows_build\set_folder_icon.ps1 -FolderPath "portable\USGS_GC_Reports_Portable"
 ```
 
 ## Option 1: the .exe (PyInstaller)
 
 ```
-packaging\build_exe.bat
+windows_build\build_exe.bat
 ```
 
-(or directly: `python -m PyInstaller packaging\USGS_GC_Reports.spec --noconfirm`,
+(or directly: `python -m PyInstaller windows_build\USGS_GC_Reports.spec --noconfirm`,
 run from anywhere — the spec resolves all its paths relative to itself, not the
 current directory.)
 
@@ -45,7 +62,7 @@ gets bundled automatically from whatever's installed in the build environment
 ## Option 2: the portable Python bundle
 
 ```
-python packaging\build_portable.py
+python windows_build\build_portable.py
 ```
 
 Output: `portable\USGS_GC_Reports_Portable\` — copy this whole folder anywhere

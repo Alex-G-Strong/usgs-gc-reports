@@ -21,11 +21,11 @@ build/
 dist/
 *.spec.bak
 
-# Portable Python bundle output (built, not committed - see packaging/README.md),
+# Portable Python bundle output (built, not committed - see windows_build/README.md),
 # plus the downloaded build inputs build_portable.py caches alongside itself
 portable/
-packaging/python-*-embed-amd64.zip
-packaging/get-pip.py
+windows_build/python-*-embed-amd64.zip
+windows_build/get-pip.py
 
 # Editor/OS cruft
 .DS_Store

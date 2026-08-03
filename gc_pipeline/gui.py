@@ -1893,7 +1893,21 @@ class App(tk.Tk):
         DuplicatesWizardWindow(self)
 
     def on_open_load_tab(self):
+        """The generic "Load Data..." toolbar button - routes straight past the
+        Duplicates sub-tab whenever there's nothing there to resolve, same as the
+        toolbar's own green/orange indicator labels already do for their more
+        specific cases (on_open_duplicates_tab/on_open_pressure_review). Only
+        lands on Duplicates when a same-identity group actually needs a decision;
+        otherwise goes straight to Pressure entry if anything's pending review, or
+        the Folder tab (nothing to do) if not."""
         self.notebook.select(self.load_tab)
+        if db.find_same_identity_groups(self.conn):
+            self.load_data_panel.open_duplicates_tab()
+        elif db.count_pending_load_runs(self.conn):
+            self.load_data_panel.notebook.select(self.load_data_panel.pressure_tab)
+            self.load_data_panel._rebuild_pressure_panel()
+        else:
+            self.load_data_panel.notebook.select(self.load_data_panel.folder_tab)
 
     def on_open_duplicates_tab(self):
         self.notebook.select(self.load_tab)

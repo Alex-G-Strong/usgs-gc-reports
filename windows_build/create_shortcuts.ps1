@@ -5,13 +5,13 @@
 
 .PARAMETER Mode
   "exe"      - shortcut points at dist\USGS_GC_Reports\USGS_GC_Reports.exe
-               (build it first with packaging\build_exe.bat)
+               (build it first with windows_build\build_exe.bat)
   "portable" - shortcut points at the portable bundle's launcher .bat
-               (build it first with: python packaging\build_portable.py)
+               (build it first with: python windows_build\build_portable.py)
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File packaging\create_shortcuts.ps1 -Mode exe
-  powershell -ExecutionPolicy Bypass -File packaging\create_shortcuts.ps1 -Mode portable
+  powershell -ExecutionPolicy Bypass -File windows_build\create_shortcuts.ps1 -Mode exe
+  powershell -ExecutionPolicy Bypass -File windows_build\create_shortcuts.ps1 -Mode portable
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -29,13 +29,13 @@ if ($Mode -eq "exe") {
     $WorkingDir = Split-Path -Parent $TargetPath
     $Arguments = ""
     if (-not (Test-Path $TargetPath)) {
-        Write-Error "Not found: $TargetPath`nBuild it first: packaging\build_exe.bat"
+        Write-Error "Not found: $TargetPath`nBuild it first: windows_build\build_exe.bat"
         exit 1
     }
 } else {
     $BatPath = Join-Path $RepoRoot "portable\USGS_GC_Reports_Portable\Launch USGS GC Reports.bat"
     if (-not (Test-Path $BatPath)) {
-        Write-Error "Not found: $BatPath`nBuild it first: python packaging\build_portable.py"
+        Write-Error "Not found: $BatPath`nBuild it first: python windows_build\build_portable.py"
         exit 1
     }
     # Shortcut launches the .bat via cmd.exe /c so it can carry its own icon

@@ -13,8 +13,8 @@
   later copied somewhere else).
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "dist\USGS_GC_Reports"
-  powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "D:\USGS_GC_Reports_App\exe"
+  powershell -ExecutionPolicy Bypass -File windows_build\set_folder_icon.ps1 -FolderPath "dist\USGS_GC_Reports"
+  powershell -ExecutionPolicy Bypass -File windows_build\set_folder_icon.ps1 -FolderPath "D:\USGS_GC_Reports_App\exe"
 #>
 param(
     [Parameter(Mandatory = $true)]

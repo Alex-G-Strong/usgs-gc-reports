@@ -7,7 +7,7 @@ cd /d "%~dp0.."
 python -m pip install --quiet --upgrade pyinstaller
 if errorlevel 1 goto :error
 
-python -m PyInstaller packaging\USGS_GC_Reports.spec --noconfirm
+python -m PyInstaller windows_build\USGS_GC_Reports.spec --noconfirm
 if errorlevel 1 goto :error
 
 echo.
