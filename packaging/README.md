@@ -15,6 +15,17 @@ Both ship with a desktop-usable icon (`assets/icon.ico`) and neither one bundles
 `gc_data.sqlite3` — the app creates a fresh database next to itself the first
 time it runs, so the target machine always starts clean.
 
+Each build output (the .exe's folder, the portable bundle's folder) is a single
+unit — every file in it has to stay together, or it breaks (e.g. the .exe alone,
+without its `_internal\` folder, won't run). After building, run
+`set_folder_icon.ps1` against the output folder to give it a custom Explorer
+icon — a visual cue that it's one bundle, not a folder to pick files out of:
+
+```
+powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "dist\USGS_GC_Reports"
+powershell -ExecutionPolicy Bypass -File packaging\set_folder_icon.ps1 -FolderPath "portable\USGS_GC_Reports_Portable"
+```
+
 ## Option 1: the .exe (PyInstaller)
 
 ```
