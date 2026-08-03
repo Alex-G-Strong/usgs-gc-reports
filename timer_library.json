@@ -1,0 +1,22 @@
+{
+  "GC runing workflow": [
+    {
+      "name": "First Valve",
+      "duration_seconds": 180
+    },
+    {
+      "name": "Run sample",
+      "duration_seconds": 660
+    }
+  ],
+  "Helium runs": [
+    {
+      "name": "He Valve 1",
+      "duration_seconds": 840
+    },
+    {
+      "name": "He Run Ends",
+      "duration_seconds": 1920
+    }
+  ]
+}

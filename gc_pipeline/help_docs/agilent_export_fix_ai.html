@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head><title>Agilent CSV export - technical reference</title></head>
+<body>
+
+<h1>Agilent CSV export - technical reference (for AI assistants)</h1>
+
+<p><b>Audience:</b> an AI assistant helping the scientist troubleshoot this in a
+future session, not a person reading top to bottom. Be detailed and exact
+(menu paths, setting names, file paths) but not padded with prose.</p>
+
+<h2>Symptom, as detected by this app</h2>
+<p>A run subfolder named <code>&lt;RunName&gt;.sirslt/</code> exists under the
+watched folder but contains no <code>&lt;RunName&gt;_*.csv</code> file - only the
+raw acquisition files (<code>.dx</code>, <code>.mfx</code>, <code>.rx</code>,
+<code>.acaml</code>) and method files (<code>.amx</code>, <code>.pmx</code>).
+<code>gc_pipeline/ingest.py</code>'s <code>ingest()</code> detects this via
+<code>folder.rglob("*.sirslt")</code>, checking each for any <code>*.csv</code>
+sibling, and reports the count/paths under
+<code>summary["missing_export"]</code> / <code>summary["missing_export_paths"]</code>
+- this is not a parse error (<code>summary["errors"]</code>), since there is no
+file to attempt parsing.</p>
+
+<h2>Root cause (fill in with real Agilent detail)</h2>
+<p><mark>Replace this section</mark> with the exact cause: which method/processing
+setting in the Agilent acquisition or analysis software controls whether the
+<code>_1.csv</code> peak-table export is written, its exact menu path, and the
+exact field/checkbox name.</p>
+
+<h2>Fix (fill in with real Agilent detail)</h2>
+<ul>
+<li>Exact menu path to open the method.</li>
+<li>Exact setting/checkbox to change and its correct value.</li>
+<li>Whether existing already-acquired-but-unexported runs need to be manually
+re-processed/re-exported after the fix, or only future runs are affected.</li>
+<li>Any file/registry/config path involved, if relevant.</li>
+</ul>
+
+<h2>How this surfaces in the app (for cross-referencing code)</h2>
+<p>Once the file is exported, it will just be picked up on the next ingest pass
+(manual "Ingest now" or the next watched-folder poll,
+<code>gui.py::_poll_tick</code> / <code>App.POLL_INTERVAL_MS</code>) - no
+app-side action is needed once the CSV exists. The red "N missing CSV export"
+indicator (<code>App.load_pending_errors_label</code>,
+<code>App._last_missing_export</code>) and the Folder sub-tab's banner
+(<code>App.missing_export_label</code>, wired in
+<code>load_data_panel.py</code>) clear automatically the next time
+<code>ingest()</code> reports <code>missing_export == 0</code>.</p>
+
+</body>
+</html>

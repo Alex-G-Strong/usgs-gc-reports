@@ -1,0 +1,29 @@
+# Real lab data - never goes in the repo
+RAWs/
+gc_data.sqlite3
+gc_data.sqlite3-journal
+gc_data.sqlite3-wal
+gc_data.sqlite3-shm
+
+# Design source file (not needed to run/build the app)
+*.ai
+
+# Local tool config, not project source
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Portable Python bundle output (built, not committed - see packaging/README.md)
+portable/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
