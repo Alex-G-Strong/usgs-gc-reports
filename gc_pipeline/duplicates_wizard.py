@@ -137,6 +137,19 @@ class DuplicatesWizardPanel(ttk.Frame):
         ttk.Label(top, text="Duplicates wizard", font=("", 11, "bold")).pack(side="left")
         self.status_label = ttk.Label(top, text="", foreground="#666666")
         self.status_label.pack(side="left", padx=(12, 0))
+        # Right-aligned "move forward in the stack" button, same spot/style as
+        # the Folder and Pressure entry sub-tabs' own primary action - only shown
+        # when embedded in the Load Data flow (the standalone popup entry point
+        # has nowhere to advance to). Manually advances regardless of whether
+        # every group is actually merged yet - the same thing already happens
+        # automatically once the last group is merged (see _after_merge), this
+        # is just an explicit way to move on without necessarily merging first.
+        if self._on_next is not None:
+            action_style = ttk.Style(self)
+            action_style.configure("BigAction.TButton", font=("", 10, "bold"), padding=(10, 4))
+            ttk.Button(
+                top, text="Next: Pressure entry →", style="BigAction.TButton", command=self._on_next
+            ).pack(side="right")
 
         hint = ttk.Label(
             self,

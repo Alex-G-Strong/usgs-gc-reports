@@ -69,29 +69,41 @@ def compute_percent(area, pressure, slope, intercept):
     return ATMOSPHERIC_PRESSURE * (slope * area + intercept) / pressure
 
 
-def get_series_area_bounds(conn, series_id):
-    """(min_area, max_area) across a series' non-excluded points, resolving each
-    point's effective area as override_area if set else the run's real peaks.area for
-    that series' gas. None if fewer than 1 usable point."""
+def get_series_areas(conn, series_id):
+    """[{"run_id", "sample_name", "area"}, ...] for a series' non-excluded points,
+    resolving each point's effective area as override_area if set else the run's
+    real peaks.area for that series' gas - the same resolution
+    get_series_area_bounds uses, just returning every point instead of collapsing
+    them to a min/max (for the calibration-range diagnostic chart, which plots
+    each one)."""
     series = conn.execute(
         "SELECT gas FROM calibration_series WHERE series_id = ?", (series_id,)
     ).fetchone()
     if series is None:
-        return None
+        return []
     gas = series["gas"]
     points = [p for p in db.get_calibration_series_points(conn, series_id) if not p["excluded"]]
     if not points:
-        return None
+        return []
     run_ids = [p["run_id"] for p in points]
     peaks_map = db.get_peaks_map_for_runs(conn, run_ids)
-    areas = []
+    names = {row["run_id"]: row["sample_name"] for row in db.get_data_viewer_rows(conn, run_ids)}
+    result = []
     for p in points:
         if p["override_area"] is not None:
-            areas.append(p["override_area"])
+            area = p["override_area"]
         else:
             peak = peaks_map.get(p["run_id"], {}).get(gas)
-            if peak is not None and peak["area"] is not None:
-                areas.append(peak["area"])
+            area = peak["area"] if peak is not None else None
+        if area is not None:
+            result.append({"run_id": p["run_id"], "sample_name": names.get(p["run_id"]), "area": area})
+    return result
+
+
+def get_series_area_bounds(conn, series_id):
+    """(min_area, max_area) across a series' non-excluded points. None if fewer
+    than 1 usable point."""
+    areas = [p["area"] for p in get_series_areas(conn, series_id)]
     if not areas:
         return None
     return min(areas), max(areas)

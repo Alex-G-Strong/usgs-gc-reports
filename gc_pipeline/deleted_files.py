@@ -61,6 +61,7 @@ class DeletedFilesWindow(tk.Toplevel):
         top = ttk.Frame(self)
         top.pack(fill="x", padx=6, pady=6)
         ttk.Button(top, text="Restore selected", command=self.on_restore).pack(side="left")
+        ttk.Button(top, text="Purge selected", command=self.on_purge).pack(side="left", padx=(6, 0))
         ttk.Button(top, text="Justify columns", command=self.on_justify_columns).pack(side="left", padx=(6, 0))
         self.selection_label = ttk.Label(top, text="0 selected")
         self.selection_label.pack(side="left", padx=10)
@@ -121,8 +122,12 @@ class DeletedFilesWindow(tk.Toplevel):
 
         hint = ttk.Label(
             self,
-            text="Restoring only removes the file from the ignore list - the run itself "
-                 "comes back the next time you run \"Ingest folder...\" on its original location.",
+            text="Restoring removes the file from this list and un-blocks it - the run itself "
+                 "comes back the next time you run \"Ingest folder...\" on its original location. "
+                 "Purging removes it from this list the same way, for entries you're just clearing "
+                 "out and never intend to bring back - note it has the same side effect of "
+                 "un-blocking re-ingestion, since there's no way to forget a file without also "
+                 "un-blocking it; use Restore instead if you actually want it back.",
             foreground="#666666", wraplength=580, justify="left",
         )
         hint.pack(fill="x", padx=6, pady=(0, 6))
@@ -224,6 +229,29 @@ class DeletedFilesWindow(tk.Toplevel):
             f"Restored {len(sel)} file(s). Re-run \"Ingest folder...\" on their original "
             f"location to bring them back.",
         )
+        self._load_rows()
+
+    def on_purge(self):
+        """Removes selected entries from this list entirely - for old/irrelevant
+        deletions the user is just clearing out, not planning to bring back. Same
+        underlying db.unignore_hashes call as Restore (there's no separate "forget
+        forever but still keep blocked" state in the schema - clearing the tracking
+        entry always also un-blocks re-ingestion), just framed and confirmed as its
+        own distinct action for that different intent."""
+        sel = list(self.selected_hashes)
+        if not sel:
+            messagebox.showwarning("Nothing selected", "No deleted files are selected.")
+            return
+        if not messagebox.askyesno(
+            "Purge selected?",
+            f"Remove {len(sel)} entry(ies) from this list permanently?\n\n"
+            "This also un-blocks re-ingestion for their content (same as Restore) - "
+            "use Restore instead if you actually intend to bring them back.",
+        ):
+            return
+        db.unignore_hashes(self.conn, sel)
+        self.selected_hashes.clear()
+        messagebox.showinfo("Purged", f"Removed {len(sel)} entry(ies) from the deleted-files list.")
         self._load_rows()
 
     # -- selection ("scratchpad"), same click/shift-click/drag scheme as the main

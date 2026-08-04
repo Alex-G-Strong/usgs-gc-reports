@@ -1,24 +1,33 @@
 """A window for entering known standard pressures against runs, with clipboard-paste
 support for bulk entry from a lab book, sortable/draggable rows to align the on-screen
-order with however the physical book is arranged, and undo for edits."""
+order with however the physical book is arranged, and undo for edits. Runs are grouped
+by round (or date, absent that) with the same collapsible-header + click/shift-click/
+ctrl-shift-click/drag multi-select scratchpad as the Selector tab's own tree, so a
+"chunk" of a large pending batch can be grabbed and worked with (currently: bulk
+"Assign to round...") without having to face the whole pile flattened into one list."""
 
 import tkinter as tk
-from tkinter import ttk, messagebox, font as tkfont
+from tkinter import ttk, messagebox, simpledialog, font as tkfont
 
 from gc_pipeline import db
 from gc_pipeline.widgets import DropdownChecklist, bind_fast_hscroll, justify_columns
 from gc_pipeline.run_rounds_dialog import RoundAssignDialog
 
-COLUMNS = ("handle", "run_number", "injection_date", "sample_name", "highlight", "pressure", "standard", "notes",
-           "round")
+COLUMNS = ("sel", "handle", "run_number", "injection_date", "sample_name", "highlight", "pressure", "standard",
+           "notes", "round")
 DRAG_HANDLE_GLYPH = "⋮"  # vertical ellipsis - a little three-dot drag handle
-HANDLE_COLUMN_ID = "#1"
-RUN_NUMBER_COLUMN_ID = "#2"
+SEL_COLUMN_ID = "#1"
+HANDLE_COLUMN_ID = "#2"
+RUN_NUMBER_COLUMN_ID = "#3"
 NONE_STANDARD_LABEL = "(none)"
 NO_ROUND_LABEL = "(no round)"
 ADD_NEW_STANDARD_PREFIX = "+ Add new standard: "
 TAB_CYCLE = ("pressure", "standard", "notes")
 MAX_MATCH_ROWS = 8  # how many candidates the floating standard-match list shows at once
+CHECK_ON = "☑"
+CHECK_OFF = "☐"
+SHIFT_MASK = 0x0001
+CTRL_MASK = 0x0004
 # Typing any of these into the pressure cell marks it "deliberately not recorded"
 # (e.g. the scientist forgot to take a reading) instead of trying to parse a number -
 # stops the missing-pressure nag without faking a 0 or leaving it looking "not yet done".
@@ -100,6 +109,17 @@ class PressureEntryPanel(ttk.Frame):
         self._round_names = {}  # round_id -> name, refreshed each _load_rows()
         self._highlight_overlays = {}  # run_id -> tk.Label chip, same technique as the Selector tab
 
+        # Same checkbox + click/shift-click/ctrl-shift-click/drag multi-select
+        # scratchpad as the Selector tab's own tree, ported here so a "chunk" of
+        # runs (e.g. one collapsed date/round group) can be grabbed and acted on
+        # together (currently: "Assign to round...") instead of having to work
+        # through the whole pending pile one row at a time.
+        self._table_selection = set()   # run_id set
+        self._selection_anchor = None
+        self._select_drag_anchor = None
+        self._select_drag_target_state = None
+        self._select_drag_snapshot = {}
+
         self.show_all_var = tk.BooleanVar(value=not missing_only)
 
         self._build()
@@ -124,6 +144,8 @@ class PressureEntryPanel(ttk.Frame):
         ttk.Button(top, text="Assign to round...", command=self.on_assign_to_round).pack(side="left", padx=(6, 0))
         ttk.Checkbutton(top, text="Show already entered runs", variable=self.show_all_var,
                          command=self._on_show_all_changed).pack(side="left", padx=(12, 0))
+        self.selection_label = ttk.Label(top, text="", foreground="#666666")
+        self.selection_label.pack(side="left", padx=(12, 0))
 
         # Only shown when every row currently in view belongs to the same round -
         # numbering mode is a per-round setting, so there's no single toggle state
@@ -144,11 +166,22 @@ class PressureEntryPanel(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
-        self.tree = ttk.Treeview(tree_frame, columns=COLUMNS, show="headings", selectmode="browse")
+        # "tree headings" (not just "headings") - runs are grouped under a
+        # collapsible round/date header row, same as the Selector tab's own tree,
+        # so a "chunk" of runs can be worked with at a time instead of facing the
+        # whole pending pile flattened into one list. "#0" carries the group
+        # label/disclosure triangle; every data column below is unaffected by
+        # nesting depth (a row's iid still just works with tree.set/bbox/etc
+        # regardless of which group it's nested under).
+        self.tree = ttk.Treeview(tree_frame, columns=COLUMNS, show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=220, anchor="w", stretch=False)
+        self.tree.heading("sel", text="")
+        self.tree.column("sel", width=28, anchor="center", stretch=False)
         self.tree.heading("handle", text="")
         self.tree.column("handle", width=24, anchor="center", stretch=False)
         for col in COLUMNS:
-            if col == "handle":
+            if col in ("sel", "handle"):
                 continue
             if col == "highlight":
                 self.tree.heading(col, text="Highlight")
@@ -166,6 +199,10 @@ class PressureEntryPanel(ttk.Frame):
         # applied first in each row's tags so edited/sample-marker still win.
         self.tree.tag_configure("band", background="#f4f4f4")
         self.tree.tag_configure("edited", background="#fff2cc")
+        # Group header rows (round or date) - same pale-blue banner treatment as
+        # the Selector tab's own group headers.
+        self.tree.tag_configure("group-header", background="#e8eef7")
+        self.tree.tag_configure("selected", background="#bdddff")
         # A banded row that's also edited gets its own, slightly darker shade of the
         # same yellow (darkened by the same ratio "band" darkens white) rather than
         # just "edited" flatly overriding the band color - otherwise the alternating
@@ -205,9 +242,17 @@ class PressureEntryPanel(ttk.Frame):
                 "starting from the selected row - handy for transcribing a lab book. Type "
                 "NR if a pressure was never recorded, or NULL to explicitly clear a "
                 "pressure (and any NR flag) back to empty.\n\n"
-                "Click a header to sort, or drag a row by its handle to reorder it to match "
-                "the lab book. Right-click a row (or select it and press Delete) to remove "
-                "its entry entirely.\n\n"
+                "Click a header to sort (within each group), or drag a row by its handle to "
+                "reorder it within its group to match the lab book. Right-click a row (or "
+                "select it and press Delete) to remove its entry entirely.\n\n"
+                "Runs are grouped by round (or date, if unassigned) - click a group's header "
+                "to collapse/expand it, or click anywhere else on it to select/deselect the "
+                "whole group at once. Click the checkbox column on a row to select just that "
+                "one, shift-click to select a range, ctrl-shift-click to toggle a range, or "
+                "drag through the checkbox column to sweep-select. \"Assign to round...\" acts "
+                "on whatever's checked (or everything currently shown, if nothing is) - grab a "
+                "chunk of runs this way to work through the pending pile a batch at a time "
+                "instead of all at once.\n\n"
                 "Pressure, standard, and notes can each be filled in in any order - the Save "
                 "button (and closing this window) just double-checks for mismatches (e.g. a "
                 "standard with no pressure) and catches anything typed that didn't parse."
@@ -264,7 +309,7 @@ class PressureEntryPanel(ttk.Frame):
         colors = db.get_run_highlight_colors(self.conn)
         if not colors:
             return
-        for row_iid in self.tree.get_children(""):
+        for row_iid in self._flattened_run_iids():
             run_id = int(row_iid)
             color = colors.get(run_id)
             if not color:
@@ -306,7 +351,7 @@ class PressureEntryPanel(ttk.Frame):
             self.app._update_highlight_overlays()
 
     def on_justify_columns(self):
-        justify_columns(self.tree, [c for c in COLUMNS if c != "handle"])
+        justify_columns(self.tree, [c for c in COLUMNS if c not in ("sel", "handle")])
 
     def _autosize_standard_column(self):
         names = [s["name"] for s in db.list_standards(self.conn)] + [NONE_STANDARD_LABEL, "standard"]
@@ -368,40 +413,80 @@ class PressureEntryPanel(ttk.Frame):
             if self._round_names.get(r["round_id"], NO_ROUND_LABEL) in allowed_round_names
             or r["run_id"] in self._always_show_run_ids
         ]
-        rows = sorted(rows, key=self._sort_key, reverse=self._sort_reverse)
-        for i, r in enumerate(rows):
-            run_id = r["run_id"]
-            if run_id in self.pending:
-                pressure = self.pending[run_id]
-            elif r["pressure"] is None and r["pressure_not_recorded"]:
-                pressure = "NR"
+        self._table_selection &= {r["run_id"] for r in rows}
+
+        # Grouped by round (spans multiple calendar days on purpose) or, absent
+        # that, by calendar date - identical grouping rule to the Selector tab's
+        # own tree, so a "chunk" of runs (a whole collapsed date/round group) can
+        # be grabbed at a glance instead of scrolling through the full pending
+        # pile as one flat list. Sorting (whichever column was last clicked)
+        # applies *within* each group, same as the Selector - a header click
+        # never reorders which group appears where, only the rows inside each one.
+        groups = {}
+        for r in rows:
+            if r["round_id"] is not None:
+                group_key = ("round", r["round_id"])
             else:
-                pressure = "" if r["pressure"] is None else str(r["pressure"])
-            tags = []
-            is_band = i % 2 == 1
-            if is_band:
-                tags.append("band")
-            if (r["standard_name"] or "").lower() == db.SAMPLE_STANDARD_NAME.lower():
-                tags.append("sample-marker")
-            if run_id in self.pending:
-                tags.append("edited-band" if is_band else "edited")
+                group_key = ("date", (r["injection_date"] or "")[:10] or "Unknown date")
+            groups.setdefault(group_key, []).append(r)
+
+        def group_sort_value(key):
+            return min((r["injection_date"] or "") for r in groups[key])
+
+        for group_key in sorted(groups, key=group_sort_value):
+            kind, ident = group_key
+            group_rows = sorted(groups[group_key], key=self._sort_key, reverse=self._sort_reverse)
+            if kind == "round":
+                group_iid = f"grp-round-{ident}"
+                label = self._round_names.get(ident, f"Round {ident}")
+            else:
+                group_iid = f"grp-date-{ident}"
+                label = ident
+            all_selected = all(r["run_id"] in self._table_selection for r in group_rows)
             self.tree.insert(
-                "", "end", iid=str(run_id),
-                # Positionally aligned with COLUMNS = (handle, run_number,
-                # injection_date, sample_name, highlight, pressure, standard, notes,
-                # round) - "highlight" has no text of its own (it's a colored-chip
-                # overlay drawn separately by _update_highlight_overlays), but it
-                # still needs its own "" placeholder here, or every column after it
-                # silently shifts left by one - which is exactly what was showing
-                # pressures under "Highlight" and standards under "Pressure".
-                values=(DRAG_HANDLE_GLYPH, r["run_number"] if r["run_number"] is not None else "",
-                        r["injection_date"], r["sample_name"], "", pressure, r["standard_name"] or "",
-                        r["notes"] or "", self._round_names.get(r["round_id"], "")),
-                tags=tags,
+                "", "end", iid=group_iid, text=f"{label}  ({len(group_rows)} runs)",
+                values=(CHECK_ON if all_selected else CHECK_OFF,) + ("",) * (len(COLUMNS) - 1),
+                open=True, tags=("group-header",),
             )
+            for i, r in enumerate(group_rows):
+                run_id = r["run_id"]
+                if run_id in self.pending:
+                    pressure = self.pending[run_id]
+                elif r["pressure"] is None and r["pressure_not_recorded"]:
+                    pressure = "NR"
+                else:
+                    pressure = "" if r["pressure"] is None else str(r["pressure"])
+                tags = []
+                is_band = i % 2 == 1
+                if is_band:
+                    tags.append("band")
+                if (r["standard_name"] or "").lower() == db.SAMPLE_STANDARD_NAME.lower():
+                    tags.append("sample-marker")
+                if run_id in self.pending:
+                    tags.append("edited-band" if is_band else "edited")
+                selected = run_id in self._table_selection
+                if selected:
+                    tags.append("selected")
+                self.tree.insert(
+                    group_iid, "end", iid=str(run_id),
+                    # Positionally aligned with COLUMNS = (sel, handle, run_number,
+                    # injection_date, sample_name, highlight, pressure, standard,
+                    # notes, round) - "highlight" has no text of its own (it's a
+                    # colored-chip overlay drawn separately by
+                    # _update_highlight_overlays), but it still needs its own ""
+                    # placeholder here, or every column after it silently shifts
+                    # left by one - which is exactly what was showing pressures
+                    # under "Highlight" and standards under "Pressure".
+                    values=(CHECK_ON if selected else CHECK_OFF, DRAG_HANDLE_GLYPH,
+                            r["run_number"] if r["run_number"] is not None else "",
+                            r["injection_date"], r["sample_name"], "", pressure, r["standard_name"] or "",
+                            r["notes"] or "", self._round_names.get(r["round_id"], "")),
+                    tags=tags,
+                )
         self._update_headings()
         self._update_round_mode_toggle(rows)
         self._update_highlight_overlays()
+        self._update_selection_label()
 
     def _update_round_mode_toggle(self, rows):
         round_ids = {r["round_id"] for r in rows if r["round_id"] is not None}
@@ -421,13 +506,95 @@ class PressureEntryPanel(ttk.Frame):
         self.round_mode_frame.pack(side="left")
 
     def on_assign_to_round(self):
-        run_ids = [int(iid) for iid in self.tree.get_children("")]
+        # Acts on the checked selection if there is one - this is the whole point
+        # of being able to grab a chunk of runs (a collapsed date group, or a
+        # drag-selected span) and assign just that chunk to a round without
+        # touching the rest of the pending pile. Falls back to everything
+        # currently shown (the old behavior) when nothing's checked.
+        run_ids = sorted(self._table_selection) if self._table_selection else self._flattened_run_iids_int()
         if not run_ids:
             messagebox.showinfo("Nothing to assign", "There are no runs currently shown to assign.")
             return
-        RoundAssignDialog(
-            self.app, run_ids, preselect_round_id=self._current_round_id, on_done=self._load_rows
-        )
+
+        def on_done():
+            self._load_rows()
+            # A run moving into (or out of) a round changes which group it's
+            # sorted into, which can move its row somewhere else in the tree
+            # entirely - without this it can read as "the run just vanished"
+            # even though it's still right there, just scrolled out of view.
+            first_iid = str(run_ids[0])
+            if self.tree.exists(first_iid):
+                self.tree.see(first_iid)
+
+        RoundAssignDialog(self.app, run_ids, preselect_round_id=self._current_round_id, on_done=on_done)
+
+    # -- flattening across groups --------------------------------------------
+    def _flattened_run_iids(self):
+        """Every run row's iid, in on-screen order, across every group - the
+        grouped equivalent of the old flat tree.get_children(""), needed
+        anywhere that used to assume the top level *was* the full run list
+        (Enter-to-next-row, Ctrl+V paste, the highlight-chip overlay, ...)."""
+        result = []
+        for group_iid in self.tree.get_children(""):
+            result.extend(self.tree.get_children(group_iid))
+        return result
+
+    def _flattened_run_iids_int(self):
+        return [int(iid) for iid in self._flattened_run_iids()]
+
+    # -- multi-select (checkbox + click/shift-click/ctrl-shift-click/drag) ------
+    def _update_selection_label(self):
+        n = len(self._table_selection)
+        self.selection_label.config(text=f"{n} selected" if n else "")
+
+    def _set_row_table_selected(self, run_id, selected):
+        if selected:
+            self._table_selection.add(run_id)
+        else:
+            self._table_selection.discard(run_id)
+        row_iid = str(run_id)
+        if self.tree.exists(row_iid):
+            self.tree.set(row_iid, "sel", CHECK_ON if selected else CHECK_OFF)
+            base = [t for t in self.tree.item(row_iid, "tags") if t != "selected"]
+            if selected:
+                base.append("selected")
+            self.tree.item(row_iid, tags=tuple(base))
+            group_iid = self.tree.parent(row_iid)
+            if group_iid:
+                self._sync_group_glyph(group_iid)
+
+    def _sync_group_glyph(self, group_iid):
+        children = self.tree.get_children(group_iid)
+        all_selected = bool(children) and all(int(c) in self._table_selection for c in children)
+        self.tree.set(group_iid, "sel", CHECK_ON if all_selected else CHECK_OFF)
+
+    def _toggle_group(self, group_iid):
+        children = self.tree.get_children(group_iid)
+        desired = not all(int(c) in self._table_selection for c in children)
+        for c in children:
+            self._set_row_table_selected(int(c), desired)
+        self._update_selection_label()
+
+    def _select_range(self, anchor_run_id, target_run_id):
+        order = self._flattened_run_iids_int()
+        if anchor_run_id not in order or target_run_id not in order:
+            return
+        i, j = order.index(anchor_run_id), order.index(target_run_id)
+        lo, hi = min(i, j), max(i, j)
+        for rid in order[lo:hi + 1]:
+            self._set_row_table_selected(rid, True)
+        self._update_selection_label()
+
+    def _toggle_range(self, anchor_run_id, target_run_id):
+        order = self._flattened_run_iids_int()
+        if anchor_run_id not in order or target_run_id not in order:
+            return
+        desired = target_run_id not in self._table_selection
+        i, j = order.index(anchor_run_id), order.index(target_run_id)
+        lo, hi = min(i, j), max(i, j)
+        for rid in order[lo:hi + 1]:
+            self._set_row_table_selected(rid, desired)
+        self._update_selection_label()
 
     def _on_round_mode_changed(self):
         if self._current_round_id is None:
@@ -472,23 +639,105 @@ class PressureEntryPanel(ttk.Frame):
 
     # -- drag-to-reorder ---------------------------------------------------
     def on_row_press(self, event):
-        # Only the drag-handle column starts a reorder - clicking anywhere else on
-        # the row just selects it (e.g. to anchor a paste), as normal.
-        if self.tree.identify_region(event.x, event.y) != "cell":
+        # Dragging a column-header border to resize it must never be mistaken for
+        # a row action - same guard the Selector tab's own tree uses.
+        if self.tree.identify_region(event.x, event.y) == "separator":
+            self._select_drag_anchor = None
             return
-        if self.tree.identify_column(event.x) != HANDLE_COLUMN_ID:
+        if self.tree.identify_element(event.x, event.y) == "Treeitem.indicator":
+            self._select_drag_anchor = None
             return
-        self._drag_row_iid = self.tree.identify_row(event.y)
+        row_iid = self.tree.identify_row(event.y)
+        if not row_iid:
+            self._select_drag_anchor = None
+            return
+
+        if row_iid.startswith("grp-"):
+            # Enlarge the native expand/collapse hitbox to a full square at the
+            # left edge (as tall as the row) - same trick the Selector tab uses,
+            # so it doesn't take a pixel-precise click on the tiny triangle.
+            # Clicking further right bulk-selects/deselects the whole group instead.
+            bbox = self.tree.bbox(row_iid)
+            row_height = bbox[3] if bbox else 20
+            if event.x <= row_height:
+                self.tree.item(row_iid, open=not self.tree.item(row_iid, "open"))
+                self._select_drag_anchor = None
+                return
+            self._toggle_group(row_iid)
+            self._select_drag_anchor = None
+            return
+
+        # Not a group header past this point - a real run row.
+        if self.tree.identify_region(event.x, event.y) == "cell" and \
+                self.tree.identify_column(event.x) == HANDLE_COLUMN_ID:
+            # The drag-handle column still starts a manual reorder (to match a
+            # physical lab book's order) - unrelated to the selection scratchpad.
+            self._drag_row_iid = row_iid
+            return
+
+        # Selecting isn't limited to the narrow "sel" checkbox column - clicking
+        # any column that has no dedicated edit behavior of its own (run number,
+        # date, sample name, round) also starts/continues a select-drag, matching
+        # the Selector tab's "click anywhere on the row" convention as closely as
+        # this table can, given pressure/standard/notes/highlight/handle each
+        # already own their column's click. A checkbox-only hit target proved too
+        # easy to miss with a real mouse (28px wide, right next to the handle
+        # column) and made drag-select feel like it didn't work at all.
+        col_name = self._column_name_at(event.x)
+        if self.tree.identify_region(event.x, event.y) == "cell" and \
+                col_name in ("sel", "run_number", "injection_date", "sample_name", "round"):
+            run_id = int(row_iid)
+            shift = bool(event.state & SHIFT_MASK)
+            ctrl = bool(event.state & CTRL_MASK)
+            if shift and ctrl and self._selection_anchor is not None:
+                self._toggle_range(self._selection_anchor, run_id)
+                self._select_drag_anchor = None
+            elif shift and self._selection_anchor is not None:
+                self._select_range(self._selection_anchor, run_id)
+                self._select_drag_anchor = None
+            else:
+                self._select_drag_snapshot = {
+                    rid: (rid in self._table_selection) for rid in self._flattened_run_iids_int()
+                }
+                was_selected = run_id in self._table_selection
+                self._set_row_table_selected(run_id, not was_selected)
+                self._update_selection_label()
+                self._selection_anchor = run_id
+                self._select_drag_anchor = run_id
+                self._select_drag_target_state = not was_selected
 
     def on_row_motion(self, event):
-        if not self._drag_row_iid:
+        if self._drag_row_iid:
+            target_iid = self.tree.identify_row(event.y)
+            # Only reorder within the same group - moving a row to a different
+            # group's parent has no clear meaning (which round/date would it even
+            # belong to?), so a drag that wanders into another group is just
+            # ignored rather than silently reparenting the row.
+            if (target_iid and target_iid != self._drag_row_iid
+                    and self.tree.parent(target_iid) == self.tree.parent(self._drag_row_iid)):
+                self.tree.move(self._drag_row_iid, self.tree.parent(self._drag_row_iid), self.tree.index(target_iid))
             return
-        target_iid = self.tree.identify_row(event.y)
-        if target_iid and target_iid != self._drag_row_iid:
-            self.tree.move(self._drag_row_iid, "", self.tree.index(target_iid))
+
+        if self._select_drag_anchor is not None:
+            target_iid = self.tree.identify_row(event.y)
+            if not target_iid or target_iid.startswith("grp-"):
+                return
+            run_id = int(target_iid)
+            order = self._flattened_run_iids_int()
+            if self._select_drag_anchor not in order or run_id not in order:
+                return
+            i, j = order.index(self._select_drag_anchor), order.index(run_id)
+            lo, hi = min(i, j), max(i, j)
+            in_range = set(order[lo:hi + 1])
+            for rid in order:
+                desired = self._select_drag_target_state if rid in in_range else self._select_drag_snapshot.get(rid, False)
+                if (rid in self._table_selection) != desired:
+                    self._set_row_table_selected(rid, desired)
+            self._update_selection_label()
 
     def on_row_release(self, _event):
         self._drag_row_iid = None
+        self._select_drag_anchor = None
 
     # -- inline edit -----------------------------------------------------
     def _column_name_at(self, event_x):
@@ -502,8 +751,8 @@ class PressureEntryPanel(ttk.Frame):
         if self.tree.identify_region(event.x, event.y) != "cell":
             return
         row_iid = self.tree.identify_row(event.y)
-        if not row_iid:
-            return
+        if not row_iid or row_iid.startswith("grp-"):
+            return  # group header rows have no editable cells - on_row_press handles those clicks
         col_name = self._column_name_at(event.x)
         if col_name == "pressure":
             self._start_edit(row_iid)
@@ -515,16 +764,21 @@ class PressureEntryPanel(ttk.Frame):
             self._open_highlight_picker(int(row_iid), event.x_root, event.y_root)
 
     def on_cell_double_click(self, event):
-        # run_number is deliberately double-click-only (not part of the single-click
-        # convention the other three editable columns use) - it's a rarer, more
-        # consequential edit (it cascades every later run in the round), so it
-        # shouldn't be one accidental click away.
+        # run_number and round are deliberately double-click-only (not part of
+        # the single-click convention the other three editable columns use) -
+        # both are rarer, more consequential edits (run_number cascades every
+        # later run in the round; round moves a run between numbering schemes
+        # entirely), so neither should be one accidental click away.
         if self.tree.identify_region(event.x, event.y) != "cell":
             return
         col = self.tree.identify_column(event.x)
         row_iid = self.tree.identify_row(event.y)
-        if row_iid and col == RUN_NUMBER_COLUMN_ID:
+        if not row_iid or row_iid.startswith("grp-"):
+            return
+        if col == RUN_NUMBER_COLUMN_ID:
             self._start_run_number_edit(row_iid)
+        elif self._column_name_at(event.x) == "round":
+            self._start_round_edit(row_iid)
 
     def _open_field(self, row_iid, column, suppress_close=False):
         """Used by Tab/Enter navigation to jump straight to the pressure, standard, or
@@ -541,8 +795,10 @@ class PressureEntryPanel(ttk.Frame):
             self._start_notes_edit(row_iid, suppress_close=suppress_close)
 
     def _advance_row(self, row_iid, column):
-        """Enter: move down to the same column in the next row."""
-        all_iids = self.tree.get_children("")
+        """Enter: move down to the same column in the next row (skipping over
+        group headers - the flattened run list crosses group boundaries
+        transparently)."""
+        all_iids = self._flattened_run_iids()
         idx = all_iids.index(row_iid)
         if idx + 1 < len(all_iids):
             self._open_field(all_iids[idx + 1], column)
@@ -644,7 +900,7 @@ class PressureEntryPanel(ttk.Frame):
         def load_previous_row_value():
             """Up, pressed before anything's been typed - fills in the previous
             row's standard directly, as a fast "same as the row above" shortcut."""
-            all_iids = self.tree.get_children("")
+            all_iids = self._flattened_run_iids()
             idx = all_iids.index(row_iid)
             if idx == 0:
                 return False
@@ -913,6 +1169,96 @@ class PressureEntryPanel(ttk.Frame):
         entry.bind("<Return>", commit)
         entry.bind("<Escape>", cancel)
 
+    def _rename_round_group(self, round_id):
+        current = self._round_names.get(round_id)
+        if current is None:
+            return
+        new_name = simpledialog.askstring("Rename round", "Round name:", initialvalue=current, parent=self)
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            messagebox.showwarning("Name required", "Enter a name for the round.")
+            return
+        if new_name != current and any(r["name"] == new_name for r in db.list_run_rounds(self.conn)):
+            messagebox.showwarning("Already exists", f'A round named "{new_name}" already exists.')
+            return
+        db.rename_run_round(self.conn, round_id, new_name)
+        self.app.notify_data_changed()
+        self.app.refresh()
+        self._load_rows()
+
+    def _start_round_edit(self, row_iid):
+        """Double-clicking a run's Round cell reassigns just that one run to a
+        different existing round (or clears it back to no round) via a small
+        dropdown - a lighter-weight path than the full "Assign to round..."
+        dialog for the common "oops, wrong round" single-run fix."""
+        run_id = int(row_iid)
+        self._close_active_editor()
+        self.tree.see(row_iid)
+        self.update_idletasks()
+        bbox = self.tree.bbox(row_iid, "round")
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        rounds = db.list_run_rounds(self.conn)
+        options = [NO_ROUND_LABEL] + [r["name"] for r in rounds]
+        current = self.tree.set(row_iid, "round") or NO_ROUND_LABEL
+
+        listbox = tk.Listbox(
+            self.tree, exportselection=False, activestyle="none", relief="solid", borderwidth=1,
+            height=min(len(options), MAX_MATCH_ROWS),
+        )
+        for opt in options:
+            listbox.insert("end", opt)
+        if current in options:
+            listbox.selection_set(options.index(current))
+            listbox.activate(options.index(current))
+        listbox.place(x=x, y=y, width=max(w, 160), height=min(len(options), MAX_MATCH_ROWS) * 20)
+        listbox.focus_set()
+
+        def commit(_event=None):
+            if self._active_editor is not listbox:
+                return
+            self._active_editor = None
+            self._active_editor_close = None
+            sel = listbox.curselection()
+            listbox.destroy()
+            if not sel:
+                return
+            choice = options[sel[0]]
+            if choice == current:
+                return
+            existing_round_id = next((r["round_id"] for r in rounds if r["name"] == current), None)
+            if choice == NO_ROUND_LABEL:
+                if existing_round_id is not None:
+                    db.remove_runs_from_round(self.conn, existing_round_id, [run_id])
+            else:
+                new_round_id = next((r["round_id"] for r in rounds if r["name"] == choice), None)
+                if new_round_id is not None:
+                    db.add_runs_to_round(self.conn, new_round_id, [run_id])
+            self._load_rows()
+            self.app.refresh()
+            self.app.notify_data_changed()
+            # Keep the just-reassigned run in view rather than letting it silently
+            # scroll off-screen just because it moved to a different group.
+            if self.tree.exists(row_iid):
+                self.tree.see(row_iid)
+
+        def cancel(_event=None):
+            if self._active_editor is not listbox:
+                return
+            self._active_editor = None
+            self._active_editor_close = None
+            listbox.destroy()
+
+        listbox.bind("<Return>", commit)
+        listbox.bind("<Double-Button-1>", commit)
+        listbox.bind("<Escape>", cancel)
+        self._active_editor = listbox
+        self._active_editor_close = commit
+        self._suppress_next_global_close = True
+
     def _start_edit(self, row_iid, suppress_close=True):
         self._close_active_editor()
         self.tree.see(row_iid)
@@ -1110,7 +1456,9 @@ class PressureEntryPanel(ttk.Frame):
         if not values:
             return "break"
 
-        all_iids = self.tree.get_children("")
+        all_iids = self._flattened_run_iids()
+        if sel[0] not in all_iids:
+            return "break"  # a group header row was selected, not a real run - nothing to paste onto
         start_idx = all_iids.index(sel[0])
         changes = []
         for offset, value in enumerate(values):
@@ -1129,6 +1477,14 @@ class PressureEntryPanel(ttk.Frame):
     def on_row_right_click(self, event):
         row_iid = self.tree.identify_row(event.y)
         if not row_iid:
+            return
+        if row_iid.startswith("grp-round-"):
+            round_id = int(row_iid.split("-", 2)[2])
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Rename round...", command=lambda: self._rename_round_group(round_id))
+            menu.tk_popup(event.x_root, event.y_root)
+            return
+        if row_iid.startswith("grp-"):
             return
         # Right-clicking directly on an editable cell opens it for editing (every
         # _start_*_edit already selects the existing text, so this doubles as
@@ -1201,7 +1557,7 @@ class PressureEntryPanel(ttk.Frame):
         return "break"
 
     def on_remove_entry(self, row_iid):
-        if not self.tree.exists(row_iid):
+        if not self.tree.exists(row_iid) or row_iid.startswith("grp-"):
             return
         sample_name = self.tree.set(row_iid, "sample_name")
         if not messagebox.askyesno(

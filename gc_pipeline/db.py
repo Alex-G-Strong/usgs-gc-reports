@@ -478,14 +478,22 @@ def set_run_number_manual(conn, run_id, new_number):
     user-typed override. Matches the confirmed "rename rank 20 to 21 -> old 21..40
     become 22..41" example: increasing a run's number shifts every OTHER run whose
     OLD number was greater than it by the same delta (a uniform shift of the whole
-    tail, not a minimal reflow - it can leave a gap, by design).
+    tail, not a minimal reflow - it can leave a gap, by design). This direction has
+    unlimited headroom (no upper bound on a run number), so a full-delta shift of
+    the whole tail can never produce an invalid result.
 
-    Decreasing is the exact mirror of that, shifting the whole HEAD (every other
-    run whose OLD number was less than this one's) by the same (negative) delta
-    instead. The previous version only ever handled the increase direction and
-    left decreases as a no-op for other rows, which silently let this run's new
-    number collide with - duplicate - whoever was already sitting there; repeated
-    decreasing edits are what produced real duplicate run_numbers in practice.
+    Decreasing is NOT the same "shift the whole head by the full delta" mirror -
+    that formula hits a floor (run numbers don't go below 1) the moment the delta
+    is large or the edited run's old number is small, producing negative/zero
+    numbers (confirmed: moving rank 20 to 15 in a 40-run round pushed ranks 1-4 to
+    -4..0). Since there's no equivalent unlimited room below, decreasing instead
+    shifts only the band strictly between the new and old number - i.e. exactly
+    what has to move to vacate the new slot and re-close the gap the edited run
+    leaves behind - by a single step (+1), regardless of how large the delta
+    itself is: e.g. rank 20 -> 15 moves whatever currently occupies 15..19 up to
+    16..20 (a uniform +1 bulk shift, safe as one statement since the WHERE clause
+    evaluates against the pre-update values), never touching anything below 15 or
+    above 20.
 
     Returns False (writes nothing) if this run has no round assigned - manual
     numbering only makes sense within a round, since unassigned runs are always
@@ -502,8 +510,9 @@ def set_run_number_manual(conn, run_id, new_number):
         )
     elif delta < 0:
         conn.execute(
-            "UPDATE runs SET run_number = run_number + ? WHERE round_id = ? AND run_number < ? AND run_id != ?",
-            (delta, row["round_id"], old_number, run_id),
+            "UPDATE runs SET run_number = run_number + 1 WHERE round_id = ? "
+            "AND run_number >= ? AND run_number < ? AND run_id != ?",
+            (row["round_id"], new_number, old_number, run_id),
         )
     conn.execute("UPDATE runs SET run_number = ? WHERE run_id = ?", (new_number, run_id))
     conn.commit()

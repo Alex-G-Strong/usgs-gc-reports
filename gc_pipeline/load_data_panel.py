@@ -47,6 +47,18 @@ class LoadDataPanel(ttk.Frame):
 
     # -- sub-tab 1: point at / watch a folder ------------------------------------
     def _build_folder_tab(self, parent):
+        # Right-aligned "move forward in the stack" button, same spot/style as the
+        # other two sub-tabs' own primary action - routes straight past an empty
+        # Duplicates tab to Pressure entry, same smart routing the toolbar's own
+        # "Load Data..." button uses (see App.on_open_load_tab). Right-aligned so
+        # it reads as "the thing you reach for once you're done here," matching
+        # the left-to-right flow across the three sub-tabs themselves.
+        nav_bar = ttk.Frame(parent)
+        nav_bar.pack(fill="x", padx=8, pady=(8, 0))
+        ttk.Button(
+            nav_bar, text="Next →", style="BigAction.TButton", command=self.app.on_open_load_tab
+        ).pack(side="right")
+
         ttk.Label(
             parent,
             text="Point the app at the folder the GC exports into (or leave it watched, and it'll pick up "
@@ -167,6 +179,25 @@ class LoadDataPanel(ttk.Frame):
 
     # -- sub-tab 3: pressure/standard entry for whatever's still pending --------
     def _build_pressure_tab(self, parent):
+        # Right-aligned "move forward in the stack" button, same spot/style as
+        # the other two sub-tabs - this is the actual exit point of the whole
+        # Load Data flow (it's the same action as the button at the bottom, just
+        # placed where the rest of the workflow's own "next" buttons live, so
+        # there's always a consistent place to look for "what do I click now").
+        top_bar = ttk.Frame(parent)
+        top_bar.pack(fill="x", padx=8, pady=(8, 0))
+        top_finish_button = ttk.Button(
+            top_bar, text="Insert runs into database →", style="BigAction.TButton",
+            command=self.on_finish_loading,
+        )
+        top_finish_button.pack(side="right")
+        bind_tooltip(
+            top_finish_button,
+            "Saves any pending pressure/standard edits, assigns real run numbers, and permanently adds "
+            "everything currently pending to the database, then takes you to the Selector tab. You'll be "
+            "asked to confirm exactly what's about to be added first.",
+        )
+
         ttk.Label(
             parent,
             text='Runs waiting to be reviewed - enter pressures/standards, flag issues with a highlight '

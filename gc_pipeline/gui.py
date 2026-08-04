@@ -4,7 +4,7 @@ import datetime
 import subprocess
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, filedialog, messagebox, font as tkfont
+from tkinter import ttk, filedialog, messagebox, simpledialog, font as tkfont
 
 from gc_pipeline import db, export
 from gc_pipeline.ingest import ingest as run_ingest
@@ -1774,7 +1774,16 @@ class App(tk.Tk):
 
     def on_row_right_click(self, event):
         iid = self.tree.identify_row(event.y)
-        if not iid or not iid.startswith("run-"):
+        if not iid:
+            return
+        if iid.startswith("group-round-"):
+            round_id = int(iid.split("-", 2)[2])
+            menu = self._context_menu
+            menu.delete(0, "end")
+            menu.add_command(label="Rename round...", command=lambda: self._rename_round_from_selector(round_id))
+            menu.tk_popup(event.x_root, event.y_root)
+            return
+        if not iid.startswith("run-"):
             return
         self.tree.selection_set(iid)
         run_id = int(iid.split("-", 1)[1])
@@ -1798,6 +1807,28 @@ class App(tk.Tk):
         )
 
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _rename_round_from_selector(self, round_id):
+        current = next(
+            (r["name"] for r in db.list_run_rounds(self.conn) if r["round_id"] == round_id), None
+        )
+        if current is None:
+            return
+        new_name = simpledialog.askstring("Rename round", "Round name:", initialvalue=current, parent=self)
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            messagebox.showwarning("Name required", "Enter a name for the round.")
+            return
+        if new_name != current and any(
+            r["name"] == new_name for r in db.list_run_rounds(self.conn)
+        ):
+            messagebox.showwarning("Already exists", f'A round named "{new_name}" already exists.')
+            return
+        db.rename_run_round(self.conn, round_id, new_name)
+        self.notify_data_changed()
+        self.refresh()
 
     def on_open_file_location(self, run_id):
         row = self.conn.execute("SELECT source_file FROM runs WHERE run_id = ?", (run_id,)).fetchone()

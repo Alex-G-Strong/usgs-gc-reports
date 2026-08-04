@@ -19,7 +19,6 @@ from matplotlib.figure import Figure
 from matplotlib.patches import ConnectionPatch
 
 from gc_pipeline import calibration, db, export
-from gc_pipeline.data_viewer import DataViewerPanel
 from gc_pipeline.pressure_wizard import PressureEntryWindow
 from gc_pipeline.widgets import bind_fast_hscroll, bind_tooltip, justify_columns
 
@@ -161,6 +160,13 @@ class AnalysisPanel(ttk.Frame):
         self._decimal_places = 4
         self._expanded_groups = set()  # group_run_id of groups currently expanded, survives _render_tree()
 
+        # "The selected cell" - drives both the calibration-range chart and the
+        # raw CSV/peaks inspector underneath the results table. gas is None
+        # whenever a non-gas cell was what set run_id (the range chart has
+        # nothing to show then, but the raw inspector still can).
+        self._inspector_run_id = None
+        self._inspector_gas = None
+
         self._build()
 
     # -- layout -------------------------------------------------------------
@@ -177,11 +183,13 @@ class AnalysisPanel(ttk.Frame):
             header, text="Inspect current selection in Selector",
             command=self.on_inspect_in_selector,
         ).pack(side="right", padx=(0, 6))
+        ttk.Button(header, text="Reset view", command=self._reset_view_layout).pack(side="right", padx=(0, 6))
 
-        # A vertical split: the existing results-table/chart split on top, the same
-        # kind of Data Viewer pivot table the Selector tab has, underneath - so
-        # inspecting a run's raw peak data no longer means leaving this tab (see
-        # on_cell_double_click / on_open_raw_panel below).
+        # A vertical split: the existing results-table/chart split on top, a
+        # calibration-range diagnostic + raw CSV/peaks inspector underneath - so
+        # inspecting a run's raw data (or seeing how far off-curve a flagged
+        # value is) no longer means leaving this tab (see on_cell_click / on_
+        # cell_double_click below, and _set_inspector_cell).
         self._vpaned = ttk.PanedWindow(self, orient="vertical")
         self._vpaned.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -198,6 +206,11 @@ class AnalysisPanel(ttk.Frame):
             command=self.on_reassign_curve_for_selection, state="disabled",
         )
         self.reassign_button.pack(side="left", padx=(10, 0))
+        self._show_highlights_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            table_header, text="Show highlights", variable=self._show_highlights_var,
+            command=self._update_overlays,
+        ).pack(side="left", padx=(10, 0))
         ttk.Button(table_header, text="Justify columns", command=self.on_justify_columns).pack(
             side="right"
         )
@@ -234,13 +247,25 @@ class AnalysisPanel(ttk.Frame):
         self.paned.add(self.chart_frame, weight=3)
         self._build_chart(self.chart_frame)
 
-        data_viewer_frame = ttk.Frame(self._vpaned)
-        self._vpaned.add(data_viewer_frame, weight=2)
-        ttk.Label(data_viewer_frame, text="Data viewer", font=("", 10, "bold")).pack(
-            anchor="w", padx=2, pady=(0, 2)
-        )
-        self.data_viewer = DataViewerPanel(data_viewer_frame, self.app)
-        self.data_viewer.pack(fill="both", expand=True)
+        # Replaces the old embedded Data Viewer pivot table - a click on any gas
+        # cell above ("the selected cell") drives two things down here instead:
+        # a compact horizontal chart showing where that cell's own peak area
+        # falls relative to its calibration curve's own point range (so it's
+        # visually obvious how far off-curve, if at all, a flagged value is),
+        # and underneath it, the same raw CSV/peaks inspector the Selector tab
+        # has, scoped to that one run. A nested vertical PanedWindow (not a plain
+        # Frame) so this split is also user-resizable, same as every other pane
+        # in this tab.
+        self._bottom_vpaned = ttk.PanedWindow(self._vpaned, orient="vertical")
+        self._vpaned.add(self._bottom_vpaned, weight=2)
+
+        range_chart_frame = ttk.Frame(self._bottom_vpaned)
+        self._bottom_vpaned.add(range_chart_frame, weight=1)
+        self._build_range_chart(range_chart_frame)
+
+        raw_inspector_frame = ttk.Frame(self._bottom_vpaned)
+        self._bottom_vpaned.add(raw_inspector_frame, weight=3)
+        self._build_raw_inspector(raw_inspector_frame)
 
         self.bind_all("<Button-1>", self._on_global_click, add="+")
         self.after(0, self._set_initial_sash)
@@ -253,24 +278,31 @@ class AnalysisPanel(ttk.Frame):
         self.app.notebook.select(self.app.selector_tab)
 
     def _set_initial_sash(self):
-        # weight alone doesn't reliably land the chart pane at its target fraction of
-        # the paned window's width on first layout (it only governs redistribution on
-        # later resizes), so pin the sash explicitly once real geometry is available -
-        # matches the 5:3 table:chart ratio the panes were added with.
+        self._reset_view_layout(retry=True)
+
+    def _reset_view_layout(self, retry=False):
+        """Restores all three resizable panes (table/composition-chart split,
+        top/bottom split, and range-chart/raw-inspector split) to their default
+        ratios - both the first-layout call from _build() and the "Reset view"
+        button use this. weight alone doesn't reliably land a pane at its target
+        fraction on first layout (it only governs redistribution on later
+        resizes), so each sash is pinned explicitly once real geometry is
+        available - retrying shortly if the widget isn't sized yet (only
+        relevant for the very first call, right after construction; a later
+        "Reset view" click always has real geometry already)."""
         total = self.paned.winfo_width()
-        if total > 50:
-            self.paned.sashpos(0, int(total * 0.625))
-        else:
-            self.after(50, self._set_initial_sash)
-            return
-        # Same idea for the outer vertical split (results table+chart on top, the
-        # embedded Data Viewer below) - matches the 3:2 weight ratio the panes were
-        # added with.
         vtotal = self._vpaned.winfo_height()
-        if vtotal > 50:
-            self._vpaned.sashpos(0, int(vtotal * 0.6))
-        else:
-            self.after(50, self._set_initial_sash)
+        bottom_total = self._bottom_vpaned.winfo_height()
+        if total <= 50 or vtotal <= 50 or bottom_total <= 50:
+            if retry:
+                self.after(50, self._set_initial_sash)
+            return
+        # Matches each pane's own weight ratio: 5:3 table:chart, 3:2 top:bottom,
+        # 1:3 range-chart:raw-inspector (the range chart only needs a compact
+        # strip; the raw inspector benefits from more room to read a full CSV).
+        self.paned.sashpos(0, int(total * 0.625))
+        self._vpaned.sashpos(0, int(vtotal * 0.6))
+        self._bottom_vpaned.sashpos(0, int(bottom_total * 0.25))
 
     def on_justify_columns(self):
         if self.tree is not None:
@@ -290,6 +322,152 @@ class AnalysisPanel(ttk.Frame):
     # not one of the gas colors, so it always reads as UI chrome, not data.
     BRACKET_COLOR = "#333333"
     PILL_HIT_PAD = 6  # extra px of grab tolerance around the pill's rendered bbox
+
+    # -- calibration-range diagnostic chart + raw inspector, for "the selected cell" --
+    RANGE_POINT_COLOR = "#7f9bb5"     # muted blue - the curve's own standard points
+    RANGE_SAMPLE_IN_COLOR = "#3a9b52"  # green - sample area falls inside the curve's range
+    RANGE_SAMPLE_OUT_COLOR = "#c0392b"  # red - sample area falls outside it
+
+    def _build_range_chart(self, parent):
+        header = ttk.Frame(parent)
+        header.pack(fill="x")
+        ttk.Label(header, text="Calibration range - selected cell", font=("", 9, "bold")).pack(side="left")
+        self.range_chart_label = ttk.Label(header, text="", foreground="#666666")
+        self.range_chart_label.pack(side="left", padx=(8, 0))
+        self.range_fig = Figure(figsize=(6, 1.2), dpi=95)
+        self.range_ax = self.range_fig.add_subplot(111)
+        self.range_canvas = FigureCanvasTkAgg(self.range_fig, master=parent)
+        self.range_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._render_range_chart()
+
+    def _render_range_chart(self):
+        self.range_ax.clear()
+        self.range_ax.set_yticks([])
+        self.range_ax.set_xlabel("peak area", fontsize=8)
+        self.range_ax.tick_params(labelsize=7)
+        self.range_ax.axvline(0, color="#bbbbbb", linewidth=0.8, zorder=0)
+
+        run_id, gas = self._inspector_run_id, self._inspector_gas
+        if run_id is None or gas is None:
+            self.range_ax.text(
+                0.5, 0.5, "Click a gas cell above to see its calibration range",
+                ha="center", va="center", transform=self.range_ax.transAxes,
+                color="#888888", fontsize=8,
+            )
+            self.range_chart_label.config(text="")
+            self.range_fig.tight_layout()
+            self.range_canvas.draw_idle()
+            return
+
+        series = self._series_for(run_id, gas)
+        peaks_map = db.get_peaks_map_for_runs(self.conn, [run_id])
+        peak = peaks_map.get(run_id, {}).get(gas)
+        row = self._rows.get(run_id)
+        sample_name = (row["sample_name"] if row is not None else None) or f"run {run_id}"
+
+        if peak is None or peak["area"] is None:
+            self.range_ax.text(
+                0.5, 0.5, f"{sample_name}: no {gas} peak on this run",
+                ha="center", va="center", transform=self.range_ax.transAxes,
+                color="#888888", fontsize=8,
+            )
+            self.range_chart_label.config(text="")
+            self.range_fig.tight_layout()
+            self.range_canvas.draw_idle()
+            return
+        sample_area = peak["area"]
+
+        if series is None or series["slope"] is None:
+            self.range_ax.text(
+                0.5, 0.5, f"{sample_name}: no calibration curve selected for {gas}",
+                ha="center", va="center", transform=self.range_ax.transAxes,
+                color="#888888", fontsize=8,
+            )
+            self.range_chart_label.config(text=f"This run's own {gas} area: {sample_area:.4g}")
+            self.range_fig.tight_layout()
+            self.range_canvas.draw_idle()
+            return
+
+        curve_points = calibration.get_series_areas(self.conn, series["series_id"])
+        curve_areas = [p["area"] for p in curve_points]
+
+        if curve_areas:
+            self.range_ax.scatter(
+                curve_areas, [0] * len(curve_areas), color=self.RANGE_POINT_COLOR, s=40, zorder=2,
+                label=f'{series["name"]} points',
+            )
+            lo, hi = min(curve_areas), max(curve_areas)
+            is_out = sample_area < lo or sample_area > hi
+        else:
+            lo = hi = None
+            is_out = False
+
+        color = self.RANGE_SAMPLE_OUT_COLOR if is_out else self.RANGE_SAMPLE_IN_COLOR
+        self.range_ax.axvline(sample_area, color=color, linewidth=2.5, zorder=3, label=sample_name)
+        self.range_ax.scatter([sample_area], [0], color=color, s=90, marker="D", zorder=4, edgecolors="#333333")
+
+        # Positive peak areas across the standards vs. a sample can easily span
+        # more than an order of magnitude (confirmed against real data - e.g.
+        # 593 to 171344 for one CH4 channel) - log scale keeps a point that's
+        # merely 2x off the range from looking indistinguishable from one that's
+        # 50x off, which a linear axis would otherwise compress into.
+        all_positive = sample_area > 0 and all(a > 0 for a in curve_areas)
+        self.range_ax.set_xscale("log" if all_positive else "linear")
+
+        if is_out:
+            direction = "below" if sample_area < lo else "above"
+            status = f"OUT OF RANGE ({direction} the curve's {lo:.4g}-{hi:.4g} range)"
+        elif lo is not None:
+            status = f"within the curve's {lo:.4g}-{hi:.4g} range"
+        else:
+            status = "curve has no fitted points yet"
+        self.range_chart_label.config(
+            text=f"{sample_name}: area={sample_area:.4g} - {status}", foreground=color if is_out else "#666666"
+        )
+        self.range_ax.legend(fontsize=6, loc="upper right")
+        self.range_fig.tight_layout()
+        self.range_canvas.draw_idle()
+
+    def _build_raw_inspector(self, parent):
+        ttk.Label(parent, text="Raw inspector", font=("", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        text_frame = ttk.Frame(parent)
+        text_frame.pack(fill="both", expand=True)
+        scroll = ttk.Scrollbar(text_frame, orient="vertical")
+        self.raw_inspector_text = tk.Text(
+            text_frame, wrap="none", state="disabled", yscrollcommand=scroll.set,
+        )
+        scroll.config(command=self.raw_inspector_text.yview)
+        self.raw_inspector_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._refresh_raw_inspector()
+
+    def _refresh_raw_inspector(self):
+        self.raw_inspector_text.configure(state="normal")
+        self.raw_inspector_text.delete("1.0", "end")
+        run_id = self._inspector_run_id
+        if run_id is None:
+            self.raw_inspector_text.insert("end", "Click a gas cell above to inspect that run's raw CSV data.")
+        else:
+            run = self.conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if run is None:
+                self.raw_inspector_text.insert("end", "This run no longer exists.")
+            else:
+                self.raw_inspector_text.insert("end", f"{run['sample_name']}  ({run['source_file']})\n\n")
+                self.raw_inspector_text.insert("end", "--- Raw header ---\n")
+                self.raw_inspector_text.insert("end", (run["raw_header_text"] or "") + "\n\n")
+                self.raw_inspector_text.insert("end", "--- Peaks ---\n")
+                self.raw_inspector_text.insert("end", "gas\trt\trf\tarea\tamount\tconcentration\n")
+                for p in db.get_peaks_for_run(self.conn, run_id):
+                    self.raw_inspector_text.insert(
+                        "end", f"{p['gas']}\t{p['rt']}\t{p['rf']}\t{p['area']}\t{p['amount']}\t{p['concentration']}\n"
+                    )
+        self.raw_inspector_text.configure(state="disabled")
+
+    def _set_inspector_cell(self, run_id, gas=None):
+        self._inspector_run_id = run_id
+        self._inspector_gas = gas
+        self._render_range_chart()
+        self._refresh_raw_inspector()
 
     def _build_chart(self, parent):
         ttk.Label(parent, text="Composition breakdown", font=("", 10, "bold")).pack(
@@ -393,6 +571,16 @@ class AnalysisPanel(ttk.Frame):
         self.tree.bind("<<TreeviewOpen>>", self._on_group_open, add="+")
         self.tree.bind("<<TreeviewClose>>", self._on_group_close, add="+")
         self.tree.bind("<Configure>", lambda _e: self._update_overlays(), add="+")
+        # Dragging a column border to resize it doesn't fire <Configure> on the
+        # tree itself (only the widget's own outer size change does, and a column
+        # resize is purely internal layout) - without this, every cell-border/
+        # highlight overlay stays stuck at its pre-resize .place() coordinates
+        # until some *other* event happens to trigger a refresh. A resize always
+        # ends in a button release over the tree, so catching it here (layered
+        # on top of on_row_release's own unrelated row-drag handling) is a simple,
+        # reliable enough hook without having to specifically detect "that release
+        # was a column-border drag."
+        self.tree.bind("<ButtonRelease-1>", lambda _e: self._update_overlays(), add="+")
         self._hsb.configure(command=self._on_hscroll)
         self._vsb.configure(command=self._on_vscroll)
         self.tree.bind("<MouseWheel>", lambda _e: self.after(1, self._update_overlays), add="+")
@@ -464,7 +652,11 @@ class AnalysisPanel(ttk.Frame):
         self._render_tree()
         self._render_chart()
         self._update_reassign_button_state()
-        self.data_viewer.refresh(list(self._rows.keys()))
+        # A reload can drop the run the range chart/raw inspector were pointed
+        # at (or its selected gas may no longer be relevant) - reset rather than
+        # risk showing stale data for a run that's no longer in view.
+        if self._inspector_run_id not in self._rows:
+            self._set_inspector_cell(None, None)
         # Auto-justify on every load rather than requiring a manual click - a fresh
         # gas column (or one going away) otherwise leaves Notes squeezed down to its
         # old fixed width, which is exactly what cuts it off. winfo_width() needs
@@ -746,11 +938,21 @@ class AnalysisPanel(ttk.Frame):
                 self.tree.item(iid, values=self._row_values(run_id))
         self._update_overlays()
 
-    def _place_cell_border(self, x, y, w, h, color, iid, run_id, gas, tooltip_text=None):
+    def _place_cell_border(self, x, y, w, h, color, iid, run_id, gas, tooltip_text=None, labels=None):
         """4 thin colored strips outlining the cell's bbox, not a filled label -
         leaves the real Treeview text in the middle fully visible/legible (a filled
         overlay would have to draw its own copy of that text, which is exactly what
-        went stale and hid extra digits when "More digits" raised the precision)."""
+        went stale and hid extra digits when "More digits" raised the precision).
+
+        `labels`, if given, is an existing list of 4 Labels from a prior call for
+        this same (run_id, gas) - they're repositioned/recolored in place instead
+        of destroyed and recreated. Reuse matters here specifically: this table can
+        have dozens of flagged cells at once, and creating 4 brand-new Tk widgets
+        per cell on *every* scroll tick/resize/edit (the old behavior - destroy
+        everything, rebuild from scratch, every single call) is what made the
+        table noticeably slow to interact with. Click/drag bindings are still
+        rebound every call regardless, since they close over this cell's current
+        x/y, which does change across calls (scroll, resize, row reorder)."""
         t = self.CELL_BORDER_THICKNESS
         strips = [
             (x, y, w, t),               # top
@@ -758,39 +960,48 @@ class AnalysisPanel(ttk.Frame):
             (x, y, t, h),               # left
             (x + w - t, y, t, h),       # right
         ]
-        labels = []
-        for sx, sy, sw, sh in strips:
-            label = tk.Label(self.tree, bg=color, bd=0)
+        is_new = labels is None
+        if is_new:
+            labels = [tk.Label(self.tree, bd=0) for _ in strips]
+        for label, (sx, sy, sw, sh) in zip(labels, strips):
+            label.configure(bg=color)
             label.place(x=sx, y=sy, width=sw, height=sh)
-            # A plain click has to keep selecting the row (as clicking anywhere else
-            # on the row does) - otherwise this overlay silently blocks selection/
-            # the composition chart for exactly the rows that most need attention,
-            # since it sits on top of the real tree cell. Press/motion are forwarded
-            # too (translated into tree-relative coordinates) so a range-select drag
-            # can start or continue on a cell that happens to already have a border,
-            # instead of being silently swallowed by it.
+            # Text is stored on the widget and read back by a callable passed to
+            # bind_tooltip below, rather than updated by rebinding on every call -
+            # bind_tooltip's own bindings use add="+", so calling it more than
+            # once per widget would stack duplicate handlers on a *reused* label
+            # (harmless for a brand-new one, since the old code never reused
+            # widgets, but very much not harmless once reuse is in play).
+            label._tooltip_text = tooltip_text or ""
+            # Same reasoning for the plain click/drag bindings below: since a
+            # label can now be reused across calls with a *different* x/y (the
+            # cell scrolled, a column resized, ...), they're rebound every call -
+            # but with plain .bind() (no add="+"), which replaces rather than
+            # stacks the previous handler for that event on this widget.
             label.bind("<Button-1>", lambda _e, ii=iid: self._select_row_via_overlay(ii))
-            label.bind("<ButtonPress-1>", lambda e, lx=x, ly=y: self._on_overlay_press(e, lx, ly), add="+")
-            label.bind("<B1-Motion>", lambda e, lx=x, ly=y: self._on_overlay_motion(e, lx, ly), add="+")
-            label.bind("<ButtonRelease-1>", self.on_row_release, add="+")
+            label.bind("<ButtonPress-1>", lambda e, lx=x, ly=y: self._on_overlay_press(e, lx, ly))
+            label.bind("<B1-Motion>", lambda e, lx=x, ly=y: self._on_overlay_motion(e, lx, ly))
+            label.bind("<ButtonRelease-1>", self.on_row_release)
             label.bind(
                 "<Double-Button-1>", lambda _e, ii=iid, ri=run_id, g=gas: self._open_series_picker(ii, ri, g)
             )
-            if tooltip_text:
-                bind_tooltip(label, tooltip_text)
-            labels.append(label)
+            if is_new:
+                bind_tooltip(label, lambda lbl=label: getattr(lbl, "_tooltip_text", ""))
         return labels
 
     def _update_out_of_range_overlays(self):
         """(Re)places a colored border around every currently-visible, out-of-range
         (or range-selected) gas cell - the only way to mark a single ttk.Treeview
         cell, since the widget has no native per-cell background/border. Re-run
-        after any render and after scrolling/resizing, since .place() coordinates
-        are viewport-relative and go stale the moment the view moves."""
-        for labels in self._cell_overlays.values():
-            for label in labels:
-                label.destroy()
-        self._cell_overlays = {}
+        after any render and after scrolling/resizing/column-resizing, since
+        .place() coordinates are viewport-relative and go stale the moment the
+        view moves or a column's width changes.
+
+        Reuses existing Label widgets for any (run_id, gas) that was already
+        overlaid last call (see _place_cell_border) and only destroys/creates for
+        cells whose flagged status actually changed - a resize/scroll that
+        doesn't change *which* cells are flagged now costs a handful of cheap
+        .place() calls instead of hundreds of widget creations."""
         if self.tree is None:
             return
         # Without this, the very first call right after _build_tree() (a freshly
@@ -801,6 +1012,7 @@ class AnalysisPanel(ttk.Frame):
         # correct geometry.
         self.tree.update_idletasks()
         self._cell_highlights = db.get_cell_highlights_for_runs(self.conn, list(self._rows.keys()))
+        still_needed = set()
         for iid in self.tree.get_children("") + tuple(
             child for parent in self.tree.get_children("") for child in self.tree.get_children(parent)
         ):
@@ -819,11 +1031,20 @@ class AnalysisPanel(ttk.Frame):
                     and run_id in self._range_selection["run_ids"]
                 )
                 cell_highlight = self._cell_highlights.get((run_id, gas))
+                # "Show highlights" hides the decorative flags (out-of-range,
+                # negative, a saved cell-highlight annotation) but never an active
+                # range-selection - that's live operational feedback for whatever
+                # you're mid-way through doing (e.g. picking cells to reassign a
+                # curve for), not a decorative marking the toggle is meant to
+                # declutter.
+                if not self._show_highlights_var.get() and not is_range_selected:
+                    continue
                 if not is_out_of_range and not is_negative and not is_range_selected and cell_highlight is None:
                     continue
                 bbox = self.tree.bbox(iid, gas)
                 if not bbox:
                     continue
+                still_needed.add((run_id, gas))
                 x, y, w, h = bbox
                 # Priority: an active range-selection (transient, mid-operation) wins
                 # over a user's own deliberate cell highlight (a persistent
@@ -848,8 +1069,16 @@ class AnalysisPanel(ttk.Frame):
                 if tooltip_text is None and is_out_of_range:
                     tooltip_text = f"This run's {gas} peak area is {reason} the selected curve's calibrated range."
                 self._cell_overlays[(run_id, gas)] = self._place_cell_border(
-                    x, y, w, h, color, iid, run_id, gas, tooltip_text
+                    x, y, w, h, color, iid, run_id, gas, tooltip_text,
+                    labels=self._cell_overlays.get((run_id, gas)),
                 )
+        # Anything overlaid last time but not needed anymore (the flag cleared, or
+        # the row/gas scrolled out of the currently-rendered set) gets torn down -
+        # this is the only remaining destroy path, scoped to just the delta.
+        for key in list(self._cell_overlays):
+            if key not in still_needed:
+                for label in self._cell_overlays.pop(key):
+                    label.destroy()
 
     def _update_highlight_overlays(self):
         """Same colored-chip-over-a-cell technique as the Selector tab's own
@@ -914,14 +1143,21 @@ class AnalysisPanel(ttk.Frame):
         return row_iid, run_id, col_name
 
     def on_cell_click(self, event):
-        # Single click: notes only. Changing a gas cell's curve requires a double
-        # click, so a single click can't accidentally reassign a curve mid-scroll.
+        # Single click: notes edits, or (for a gas cell) selects it as "the
+        # selected cell" - driving the calibration-range chart and raw
+        # inspector underneath the table. Changing a gas cell's curve still
+        # requires a double click, so a single click can't accidentally
+        # reassign a curve mid-scroll.
         hit = self._cell_at(event)
         if hit is None:
             return
         row_iid, run_id, col_name = hit
         if col_name == "notes":
             self._open_notes_editor(row_iid, run_id)
+        elif col_name in self._gases:
+            self._set_inspector_cell(run_id, col_name)
+        else:
+            self._set_inspector_cell(run_id, None)
 
     def on_cell_double_click(self, event):
         hit = self._cell_at(event)
@@ -930,20 +1166,6 @@ class AnalysisPanel(ttk.Frame):
         row_iid, run_id, col_name = hit
         if col_name in self._gases:
             self._open_series_picker(row_iid, run_id, col_name)
-        elif col_name != "notes":
-            self.on_open_raw_panel(run_id)
-
-    def on_open_raw_panel(self, run_id):
-        """Points the embedded Data Viewer (below the results table) at this run
-        instead of leaving the tab - it already shows this run's own peak data per
-        gas, right here. The full raw-header/peaks text inspector still only lives
-        in the Selector tab; use "Inspect current selection in Selector..." above
-        for that."""
-        row_iid = f"run-{run_id}"
-        if self.data_viewer.tree.exists(row_iid):
-            self.data_viewer.tree.see(row_iid)
-            self.data_viewer.tree.selection_set(row_iid)
-            self.data_viewer.tree.focus(row_iid)
 
     def _open_series_picker(self, row_iid, run_id, gas):
         self._close_active_popup()
@@ -978,6 +1200,14 @@ class AnalysisPanel(ttk.Frame):
             self._series_selection[(run_id, gas)] = series_id
             self._close_active_popup()
             self._refresh_row(run_id)
+            # The range chart caches "the selected cell" independently of the
+            # results table - without this it kept showing whichever curve was
+            # assigned *before* this reassignment (confirmed bug: for a gas with
+            # more than one curve, like He with separate Std-1/Std-3 fits, moving
+            # a cell from one to the other left the chart showing the old curve's
+            # range until some unrelated action happened to trigger a redraw).
+            if self._inspector_run_id == run_id and self._inspector_gas == gas:
+                self._render_range_chart()
 
         listbox.bind("<<ListboxSelect>>", commit)
         listbox.bind("<Escape>", lambda _e: self._close_active_popup())
@@ -1117,6 +1347,8 @@ class AnalysisPanel(ttk.Frame):
             for run_id in run_ids:
                 self._refresh_row(run_id)
             self._render_chart()
+            if self._inspector_gas == gas and self._inspector_run_id in run_ids:
+                self._render_range_chart()
 
         listbox.bind("<Double-Button-1>", lambda _e: apply_and_close())
         listbox.bind("<Return>", lambda _e: apply_and_close())
@@ -1266,11 +1498,23 @@ class AnalysisPanel(ttk.Frame):
         if hit is not None:
             _row_iid, run_id, col_name = hit
             if col_name in self._gases:
+                # If there's an active range-selection on this same gas column,
+                # "Set highlight" applies to every cell in it, not just the one
+                # that happened to be right-clicked - matches "Reassign curve for
+                # selection...", the other bulk action on this same selection.
+                # Right-clicking a cell outside any selection (or on a different
+                # gas) still targets just that one cell, same as before.
+                if (self._range_selection is not None and self._range_selection["gas"] == col_name
+                        and run_id in self._range_selection["run_ids"]):
+                    target_run_ids = list(self._range_selection["run_ids"])
+                else:
+                    target_run_ids = [run_id]
                 if menu.index("end") is not None:
                     menu.add_separator()
                 highlight_menu = tk.Menu(menu, tearoff=0)
                 highlight_menu.add_command(
-                    label="(none)", command=lambda: self._set_cell_highlight(run_id, col_name, None)
+                    label="(none)",
+                    command=lambda: self._set_cell_highlight_bulk(target_run_ids, col_name, None),
                 )
                 swatches = db.list_highlight_swatches(self.conn)
                 if swatches:
@@ -1279,20 +1523,22 @@ class AnalysisPanel(ttk.Frame):
                         label = swatch["label"] or swatch["color"]
                         highlight_menu.add_command(
                             label=label, background=swatch["color"],
-                            command=lambda sid=swatch["swatch_id"]: self._set_cell_highlight(
-                                run_id, col_name, sid
+                            command=lambda sid=swatch["swatch_id"]: self._set_cell_highlight_bulk(
+                                target_run_ids, col_name, sid
                             ),
                         )
                 highlight_menu.add_separator()
                 highlight_menu.add_command(label="Edit swatches...", command=self.app.on_edit_highlight_swatches)
-                menu.add_cascade(label=f"Set highlight ({col_name})", menu=highlight_menu)
+                count_suffix = f" - {len(target_run_ids)} cell(s)" if len(target_run_ids) > 1 else ""
+                menu.add_cascade(label=f"Set highlight ({col_name}){count_suffix}", menu=highlight_menu)
 
         if menu.index("end") is None:
             return
         menu.tk_popup(event.x_root, event.y_root)
 
-    def _set_cell_highlight(self, run_id, gas, swatch_id):
-        db.set_cell_highlight(self.conn, run_id, gas, swatch_id)
+    def _set_cell_highlight_bulk(self, run_ids, gas, swatch_id):
+        for run_id in run_ids:
+            db.set_cell_highlight(self.conn, run_id, gas, swatch_id)
         self._update_overlays()
 
     # -- composition chart --------------------------------------------------------
@@ -1307,18 +1553,23 @@ class AnalysisPanel(ttk.Frame):
         self._render_chart()
 
     def _default_zoom_ceiling(self, run_ids):
-        """1.2x the largest gas percentage among these rows - e.g. a 20%-gas
-        mixture defaults to a ~24% zoom ceiling, a 0.5%-gas mixture to ~0.6% - so
-        the zoomed panel gives an at-a-glance read on the actual composition
-        instead of an arbitrary fixed range. Falls back to the old fixed default
-        when there's nothing measured yet (nothing selected, or every cell is
-        still BD/unselected-curve)."""
-        max_percent = 0.0
+        """1.15x the largest *stacked total* (the sum of every gas's percent,
+        per row) among these rows - not just the single tallest gas. The chart
+        is a stacked bar, so its actual full height is the sum of its segments;
+        sizing the zoom off only the biggest individual gas could leave the top
+        of a bar cut off the moment a sample has more than one measured gas
+        contributing real height. E.g. a run with 20% + 10% + 5% across three
+        gases needs headroom for the full 35% stack, not just 20%*1.15.
+        Falls back to the old fixed default when there's nothing measured yet
+        (nothing selected, or every cell is still BD/unselected-curve)."""
+        max_sum = 0.0
         for run_id in run_ids:
-            for value, _reason in self.compute_row_percentages(run_id).values():
-                if isinstance(value, (int, float)):
-                    max_percent = max(max_percent, value)
-        return max_percent * 1.2 if max_percent > 0 else 20.0
+            row_sum = sum(
+                value for value, _reason in self.compute_row_percentages(run_id).values()
+                if isinstance(value, (int, float))
+            )
+            max_sum = max(max_sum, row_sum)
+        return max_sum * 1.15 if max_sum > 0 else 20.0
 
     def _selected_run_ids(self):
         run_ids = []
